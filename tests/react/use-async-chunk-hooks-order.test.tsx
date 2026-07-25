@@ -5,6 +5,7 @@ import {
   asyncChunk,
   AsyncChunk,
   PaginatedAsyncChunk,
+  paginatedAsyncChunk,
 } from "../../src/query/async-chunk";
 import { useAsyncChunk } from "../../src/use-react/hooks/use-async-chunk";
 
@@ -29,14 +30,8 @@ function HookHarness({
 describe("useAsyncChunk hook order stability", () => {
   it("does not throw when rerendering from non-paginated to paginated chunk", () => {
     const nonPaginated = asyncChunk(async () => "ok");
-    const paginated = asyncChunk(
-      async ({
-        page = 1,
-        pageSize = 2,
-      }: {
-        page?: number;
-        pageSize?: number;
-      }) => ({
+    const paginated = paginatedAsyncChunk(
+      async ({ page = 1, pageSize = 2 }: { page?: number; pageSize?: number }) => ({
         data: Array.from({ length: pageSize }, (_, i) => `${page}-${i}`),
         hasMore: false,
         total: 2,
@@ -44,9 +39,7 @@ describe("useAsyncChunk hook order stability", () => {
       { pagination: { pageSize: 2 } },
     ) as PaginatedAsyncChunk<string[], Error>;
 
-    const { rerender, getByTestId } = render(
-      <HookHarness source={nonPaginated} />,
-    );
+    const { rerender, getByTestId } = render(<HookHarness source={nonPaginated} />);
 
     expect(() => {
       rerender(<HookHarness source={paginated} />);
@@ -56,14 +49,8 @@ describe("useAsyncChunk hook order stability", () => {
   });
 
   it("does not throw when rerendering from paginated to non-paginated chunk", () => {
-    const paginated = asyncChunk(
-      async ({
-        page = 1,
-        pageSize = 2,
-      }: {
-        page?: number;
-        pageSize?: number;
-      }) => ({
+    const paginated = paginatedAsyncChunk(
+      async ({ page = 1, pageSize = 2 }: { page?: number; pageSize?: number }) => ({
         data: Array.from({ length: pageSize }, (_, i) => `${page}-${i}`),
         hasMore: false,
         total: 2,
@@ -73,9 +60,7 @@ describe("useAsyncChunk hook order stability", () => {
 
     const nonPaginated = asyncChunk(async () => "ok");
 
-    const { rerender, getByTestId } = render(
-      <HookHarness source={paginated} />,
-    );
+    const { rerender, getByTestId } = render(<HookHarness source={paginated} />);
 
     expect(() => {
       rerender(<HookHarness source={nonPaginated} />);
@@ -93,9 +78,7 @@ describe("useAsyncChunk hook order stability", () => {
       return null;
     }
 
-    const { rerender } = render(
-      <InitOnlyHarness params={{ query: "books" }} />,
-    );
+    const { rerender } = render(<InitOnlyHarness params={{ query: "books" }} />);
 
     await waitFor(() => {
       expect(fetcher).toHaveBeenCalledTimes(1);
@@ -125,9 +108,7 @@ describe("useAsyncChunk hook order stability", () => {
       return null;
     }
 
-    const { rerender } = render(
-      <ChunkSwitchHarness source={chunkA} params={{ query: "alpha" }} />,
-    );
+    const { rerender } = render(<ChunkSwitchHarness source={chunkA} params={{ query: "alpha" }} />);
 
     await waitFor(() => {
       expect(fetcherA).toHaveBeenCalledTimes(1);
