@@ -168,7 +168,8 @@ export interface PaginatedAsyncChunk<T, E extends Error = Error> extends AsyncCh
  */
 function createAsyncChunkInternal<T, E extends Error = Error, P extends Record<string, any> = {}>(
   fetcher: (() => Promise<T | FetcherResponse<T>>) | ((params: P) => Promise<T | FetcherResponse<T>>),
-  options: AsyncChunkOptions<T, E, P> = {}
+  options: AsyncChunkOptions<T, E, P> = {},
+  internalOpts?: { onScopedDispose?: () => void }
 ): AsyncChunk<T, E> | PaginatedAsyncChunk<T, E> {
   const globalQuery = getGlobalQueryConfig().query ?? {};
 
@@ -498,13 +499,16 @@ function createAsyncChunkInternal<T, E extends Error = Error, P extends Record<s
     },
 
     cleanup: () => {
-      if (subscriberCount <= 0) teardownSideEffects();
+      if (subscriberCount <= 0) {
+        teardownSideEffects();
+        internalOpts?.onScopedDispose?.();
+      }
     },
 
     forceCleanup: () => {
       teardownSideEffects();
+      internalOpts?.onScopedDispose?.();
     },
-
     setParams: (params: Partial<Record<keyof P, P[keyof P] | null>>) => {
       isCancelled = false;
       const next = { ...currentParams };
@@ -617,11 +621,59 @@ function createAsyncChunkInternal<T, E extends Error = Error, P extends Record<s
   }
 
   if (scoped) {
+    const scopedInstances = new Set<AsyncChunk<any, any>>();
+
     Object.defineProperty(instance, "__scopedFactory", {
-      value: () => createAsyncChunkInternal(fetcher, options),
+      value: () => {
+        let child: AsyncChunk<any, any>;
+        child = createAsyncChunkInternal(fetcher, options, {
+          onScopedDispose: () => scopedInstances.delete(child),
+        }) as AsyncChunk<any, any>;
+        scopedInstances.add(child);
+        return child;
+      },
       enumerable: false,
       writable: false,
     });
+
+    // Fan invalidation out from the module-level "parent" export (the one
+    // mutations actually pass to `invalidates`) to every live scoped
+    // instance created via useAsyncChunk in mounted components. Each child
+    // reloads with its OWN currentParams — preserves per-instance param
+    // isolation while still honoring app-wide invalidation.
+    const originalReload = instance.reload;
+    instance.reload = async (params?: any) => {
+      await Promise.all([
+        originalReload(params),
+        ...Array.from(scopedInstances).map(child => child.reload()),
+      ]);
+    };
+
+    const originalRefresh = instance.refresh;
+    instance.refresh = async (params?: any) => {
+      await Promise.all([
+        originalRefresh(params),
+        ...Array.from(scopedInstances).map(child => child.refresh()),
+      ]);
+    };
+
+    const originalMutate = instance.mutate;
+    instance.mutate = (mutator) => {
+      originalMutate(mutator);
+      scopedInstances.forEach(child => child.mutate(mutator));
+    };
+
+    if (isPaginated) {
+      const originalResetPagination = (instance as PaginatedAsyncChunk<T, E>).resetPagination;
+      (instance as PaginatedAsyncChunk<T, E>).resetPagination = async () => {
+        await Promise.all([
+          originalResetPagination(),
+          ...Array.from(scopedInstances)
+            .filter((child): child is PaginatedAsyncChunk<any, any> => 'resetPagination' in child)
+            .map(child => child.resetPagination()),
+        ]);
+      };
+    }
   }
 
   return instance;
