@@ -1449,3 +1449,135 @@ describe('asyncChunk — scoped instances', () => {
     expect(instanceB.get().pagination?.page).toBe(1);
   });
 });
+
+describe("asyncChunk — scoped invalidation propagation", () => {
+  it("should reload all live scoped instances when the parent chunk reloads", async () => {
+    let callCount = 0;
+    const fetcher = vi.fn(async () => {
+      callCount++;
+      return { id: callCount };
+    });
+
+    const parent = asyncChunk(fetcher, { scoped: true });
+    await new Promise((r) => setTimeout(r, 0)); // let parent's initial fetch settle
+
+    const factory = (parent as any).__scopedFactory as () => typeof parent;
+    const childA = factory();
+    const childB = factory();
+
+    const unsubA = childA.subscribe(() => { });
+    const unsubB = childB.subscribe(() => { });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const callsBeforeReload = fetcher.mock.calls.length;
+
+    await parent.reload();
+
+    // parent + 2 children = 3 additional fetches
+    expect(fetcher.mock.calls.length).toBe(callsBeforeReload + 3);
+
+    unsubA();
+    unsubB();
+  });
+
+  it("should not call reload on children that have been disposed (unsubscribed)", async () => {
+    const fetcher = vi.fn(async () => ({ ok: true }));
+    const parent = asyncChunk(fetcher, { scoped: true });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const factory = (parent as any).__scopedFactory as () => typeof parent;
+    const child = factory();
+
+    const unsub = child.subscribe(() => { });
+    await new Promise((r) => setTimeout(r, 0));
+
+    // dispose the child — subscriberCount drops to 0, cleanup() fires,
+    // onScopedDispose should remove it from the parent's registry
+    unsub();
+    child.cleanup();
+
+    const callsBeforeReload = fetcher.mock.calls.length;
+    await parent.reload();
+
+    // only the parent itself should have refetched — the disposed child
+    // must not receive a fan-out reload
+    expect(fetcher.mock.calls.length).toBe(callsBeforeReload + 1);
+  });
+
+  it("should call resetPagination (not reload) on paginated scoped children during invalidation", async () => {
+    const fetcher = vi.fn(async ({ page }: { page?: number; pageSize: number }) => ({
+      data: [`item-${page}`],
+      total: 10,
+    }));
+
+    const parent = paginatedAsyncChunk(fetcher, {
+      scoped: true,
+      pagination: { pageSize: 5 },
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const factory = (parent as any).__scopedFactory as () => typeof parent;
+    const child = factory();
+    const unsub = child.subscribe(() => { });
+    await new Promise((r) => setTimeout(r, 0));
+
+    // move child to page 2 so we can assert resetPagination brings it back to 1
+    await child.nextPage();
+    expect(child.get().pagination?.page).toBe(2);
+
+    await parent.resetPagination();
+
+    expect(child.get().pagination?.page).toBe(1);
+
+    unsub();
+  });
+
+  it("should propagate mutate() to all live scoped instances", async () => {
+    const fetcher = vi.fn(async () => ({ count: 0 }));
+    const parent = asyncChunk(fetcher, { scoped: true });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const factory = (parent as any).__scopedFactory as () => typeof parent;
+    const child = factory();
+    const unsub = child.subscribe(() => { });
+    await new Promise((r) => setTimeout(r, 0));
+
+    parent.mutate((current) => ({ count: (current?.count ?? 0) + 1 }));
+
+    expect(child.get().data).toEqual({ count: 1 });
+
+    unsub();
+  });
+
+  it("should isolate params per scoped instance while still honoring parent-triggered reload", async () => {
+    const fetcher = vi.fn(async (params: { filter?: string }) => ({
+      data: [`filtered-by-${params.filter ?? "none"}`],
+    }));
+
+    const parent = asyncChunk(fetcher, { scoped: true });
+
+    const factory = (parent as any).__scopedFactory as () => typeof parent;
+    const childA = factory() as any;
+    const childB = factory() as any;
+
+    const unsubA = childA.subscribe(() => { });
+    const unsubB = childB.subscribe(() => { });
+
+    childA.setParams({ filter: "alpha" });
+    childB.setParams({ filter: "beta" });
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(childA.get().data).toEqual(["filtered-by-alpha"]);
+    expect(childB.get().data).toEqual(["filtered-by-beta"]);
+
+    await parent.reload();
+
+    // each child must refetch with its OWN currentParams, not the parent's
+    // or each other's — this is the isolation the fix is required to preserve
+    expect(childA.get().data).toEqual(["filtered-by-alpha"]);
+    expect(childB.get().data).toEqual(["filtered-by-beta"]);
+
+    unsubA();
+    unsubB();
+  });
+});
